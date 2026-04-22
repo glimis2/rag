@@ -1,4 +1,4 @@
-create database docmind;
+CREATE DATABASE IF NOT EXISTS docmind;
 use docmind;
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;

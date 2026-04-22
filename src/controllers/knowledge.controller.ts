@@ -3,6 +3,7 @@ import { AuthRequest } from '../middleware/auth';
 import { AppDataSource } from '../config/database';
 import { KnowledgeBase } from '../entities/KnowledgeBase';
 import { Chunk } from '../entities/Chunk';
+import path from 'path';
 
 export class KnowledgeController {
   private kbRepository = AppDataSource.getRepository(KnowledgeBase);
@@ -17,12 +18,14 @@ export class KnowledgeController {
         return res.status(400).json({ code: 400, message: 'No file uploaded', data: null });
       }
 
+      const fileExt = path.extname(file.originalname).toLowerCase().replace('.', '');
+
       const kb = this.kbRepository.create({
         name: name || file.originalname,
         category,
         description,
         file_url: file.path,
-        file_type: file.mimetype,
+        file_type: fileExt,
         file_size: file.size,
         status: 'uploading',
         user_id: req.userId!

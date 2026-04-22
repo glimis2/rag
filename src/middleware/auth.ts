@@ -8,7 +8,12 @@ export interface AuthRequest extends Request {
 
 export const authMiddleware = (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    const token = req.headers.authorization?.replace('Bearer ', '');
+    // 从 header 或 query 中获取 token
+    let token = req.headers.authorization?.replace('Bearer ', '');
+
+    if (!token && req.query.token) {
+      token = req.query.token as string;
+    }
 
     if (!token) {
       return res.status(401).json({ code: 401, message: 'Unauthorized', data: null });

@@ -3,25 +3,40 @@ import { AuthRequest } from '../middleware/auth';
 import { AppDataSource } from '../config/database';
 import { Conversation } from '../entities/Conversation';
 import { Message } from '../entities/Message';
+import { SSE } from 'sse-express';
+import { RagService } from '../services/ragService';
 
 export class ChatController {
   private conversationRepository = AppDataSource.getRepository(Conversation);
   private messageRepository = AppDataSource.getRepository(Message);
+  private ragService = new RagService();
 
+  /**
+   * 创建好 sse后，调用ragService.execute 方法
+   * @param req
+   * @param res
+   */
   stream = async (req: AuthRequest, res: Response) => {
     try {
       const { conversationId, message, kbIds } = req.query;
 
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
+      if (!message) {
+        return res.status(400).json({ code: 400, message: 'Message is required', data: null });
+      }
 
-      res.write(`data: ${JSON.stringify({ type: 'start', message: 'Processing...' })}\n\n`);
+      const sse = new SSE(res);
 
-      // TODO: Implement RAG pipeline
-      res.write(`data: ${JSON.stringify({ type: 'content', content: 'Response content here' })}\n\n`);
-      res.write(`data: ${JSON.stringify({ type: 'end' })}\n\n`);
-      res.end();
+      const kbIdArray = kbIds ? (Array.isArray(kbIds) ? kbIds : [kbIds]) : [];
+
+      await this.ragService.execute({
+        conversationId: conversationId as string,
+        kbIds: kbIdArray as string[],
+        sse,
+        question: message as string,
+        userId: req.userId!,
+      });
+
+      sse.close();
     } catch (error) {
       res.status(500).json({ code: 500, message: 'Stream failed', data: null });
     }

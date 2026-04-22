@@ -4,6 +4,7 @@ import { AppDataSource } from '../config/database';
 import { KnowledgeBase } from '../entities/KnowledgeBase';
 import { Chunk } from '../entities/Chunk';
 import path from 'path';
+import {processDocument} from '../services/documentService'
 
 export class KnowledgeController {
   private kbRepository = AppDataSource.getRepository(KnowledgeBase);
@@ -32,6 +33,8 @@ export class KnowledgeController {
       });
 
       await this.kbRepository.save(kb);
+
+      processDocument(kb,file) // 异步操作，无需等待
 
       // TODO: Trigger background processing
       res.json({ code: 200, message: '上传成功，正在后台处理...', data: kb.id });

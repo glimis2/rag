@@ -1,9 +1,9 @@
 import { AppDataSource } from '../config/database';
 import { KnowledgeBase } from '../entities/KnowledgeBase';
-import { TextLoader } from 'langchain/document_loaders/fs/text';
-import { PDFLoader } from 'langchain/document_loaders/fs/pdf';
-import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
-import { KbChunkService } from './KbChunkService';
+import { TextLoader } from '@langchain/classic/document_loaders/fs/text';
+import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
+import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
+import { ChunkRepository } from '../repositories/ChunkRepository';
 import { addDocuments } from './vectorStoreService';
 import { AiConfig } from '../entities/AiConfig';
 
@@ -59,16 +59,86 @@ export async function processDocument(kb: KnowledgeBase, file: Express.Multer.Fi
     const chunkSize = chunkSizeConfig ? parseInt(chunkSizeConfig.config_value) : 512;
     const chunkOverlap = chunkOverlapConfig ? parseInt(chunkOverlapConfig.config_value) : 64;
 
-    // 4. 使用 RecursiveCharacterTextSplitter 进行切块
-    const textSplitter = new RecursiveCharacterTextSplitter({
-      chunkSize,
-      chunkOverlap,
-    });
+    // 4. 根据文件类型使用 RecursiveCharacterTextSplitter 进行切块
+    let textSplitter;
+
+    switch (kb.file_type) {
+      case 'md':
+        textSplitter = RecursiveCharacterTextSplitter.fromLanguage('markdown', {
+          chunkSize,
+          chunkOverlap,
+        });
+        break;
+      case 'js':
+      case 'jsx':
+        textSplitter = RecursiveCharacterTextSplitter.fromLanguage('js', {
+          chunkSize,
+          chunkOverlap,
+        });
+        break;
+      case 'py':
+        textSplitter = RecursiveCharacterTextSplitter.fromLanguage('python', {
+          chunkSize,
+          chunkOverlap,
+        });
+        break;
+      case 'java':
+        textSplitter = RecursiveCharacterTextSplitter.fromLanguage('java', {
+          chunkSize,
+          chunkOverlap,
+        });
+        break;
+      case 'cpp':
+      case 'cc':
+      case 'cxx':
+        textSplitter = RecursiveCharacterTextSplitter.fromLanguage('cpp', {
+          chunkSize,
+          chunkOverlap,
+        });
+        break;
+      case 'go':
+        textSplitter = RecursiveCharacterTextSplitter.fromLanguage('go', {
+          chunkSize,
+          chunkOverlap,
+        });
+        break;
+      case 'rs':
+        textSplitter = RecursiveCharacterTextSplitter.fromLanguage('rust', {
+          chunkSize,
+          chunkOverlap,
+        });
+        break;
+      case 'html':
+        textSplitter = RecursiveCharacterTextSplitter.fromLanguage('html', {
+          chunkSize,
+          chunkOverlap,
+        });
+        break;
+      case 'php':
+        textSplitter = RecursiveCharacterTextSplitter.fromLanguage('php', {
+          chunkSize,
+          chunkOverlap,
+        });
+        break;
+      case 'rb':
+        textSplitter = RecursiveCharacterTextSplitter.fromLanguage('ruby', {
+          chunkSize,
+          chunkOverlap,
+        });
+        break;
+      default:
+        // 对于 pdf, txt, doc, docx 等通用文本，使用默认分割器
+        textSplitter = new RecursiveCharacterTextSplitter({
+          chunkSize,
+          chunkOverlap,
+        });
+        break;
+    }
 
     const splitDocs = await textSplitter.splitDocuments(docs);
 
     // 5. 保存切块到数据库
-    const chunkService = new KbChunkService();
+    const chunkRepository = new ChunkRepository();
     const savedChunks = [];
 
     for (let i = 0; i < splitDocs.length; i++) {
@@ -80,12 +150,12 @@ export async function processDocument(kb: KnowledgeBase, file: Express.Multer.Fi
         metadata: doc.metadata,
       };
 
-      const savedChunk = await chunkService.save(chunk);
+      const savedChunk = await chunkRepository.save(chunk);
       savedChunks.push(savedChunk);
     }
 
     // 6. 调用向量存储服务
-    await addDocuments(splitDocs, kb.id, savedChunks);
+    await addDocuments(splitDocs, kb.id, savedChunks, kb.category || '');
 
     // 7. 更新知识库状态为 ready
     await kbRepository.update(

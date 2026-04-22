@@ -65,7 +65,18 @@ export class KnowledgeController {
         .take(Number(size))
         .getManyAndCount();
 
-      res.json({ code: 200, message: 'success', data: { records, total } });
+      // 格式化返回数据，字段名使用驼峰命名
+      const formattedRecords = records.map(kb => ({
+        id: kb.id,
+        name: kb.name,
+        category: kb.category,
+        status: kb.status,
+        fileUrl: kb.file_url,
+        createTime: kb.create_time,
+        chunkCount:kb.chunk_count
+      }));
+
+      res.json({ code: 200, message: 'success', data: { records: formattedRecords, total } });
     } catch (error) {
       res.status(500).json({ code: 500, message: 'Query failed', data: null });
     }
@@ -80,7 +91,24 @@ export class KnowledgeController {
         return res.status(404).json({ code: 404, message: 'Knowledge base not found', data: null });
       }
 
-      res.json({ code: 200, message: 'success', data: kb });
+      // 格式化返回数据，字段名使用驼峰命名
+      const responseData = {
+        id: kb.id,
+        name: kb.name,
+        category: kb.category,
+        description: kb.description,
+        fileUrl: kb.file_url,
+        fileType: kb.file_type,
+        fileSize: kb.file_size,
+        chunkCount: kb.chunk_count,
+        status: kb.status,
+        errorMsg: kb.error_msg,
+        userId: kb.user_id,
+        createTime: kb.create_time,
+        updateTime: kb.update_time
+      };
+
+      res.json({ code: 200, message: 'success', data: responseData });
     } catch (error) {
       res.status(500).json({ code: 500, message: 'Query failed', data: null });
     }

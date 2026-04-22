@@ -1,8 +1,9 @@
-import { MilvusClient, DataType } from '@milvus-io/milvus2-sdk-node';
+import { MilvusClient, DataType } from '@zilliz/milvus2-sdk-node';
 import { OllamaEmbeddings } from '@langchain/ollama';
 import { Document } from '@langchain/core/documents';
 import { AppDataSource } from '../config/database';
 import { Chunk } from '../entities/Chunk';
+import { VChunk, VChunkSearchResult } from '../models/VChunk';
 
 const COLLECTION_NAME = 'docmind_vectors';
 const VECTOR_DIM = 1024; // bge-m3 embedding dimension
@@ -23,7 +24,15 @@ async function getMilvusClient(): Promise<MilvusClient> {
       collection_name: COLLECTION_NAME,
     });
 
-    if (!hasCollection.value) {
+    // if (hasCollection.value) {
+    //   // 如果存在则删除
+    //   await milvusClient.dropCollection({
+    //     collection_name: COLLECTION_NAME,
+    //   });
+    //   console.log(`Dropped existing collection '${COLLECTION_NAME}'`);
+    // }
+    if(!hasCollection.value){
+      // 创建新集合
       await createCollection();
     }
   }
@@ -47,17 +56,38 @@ async function createCollection(): Promise<void> {
         autoID: true,
       },
       {
-        name: 'kb_id',
-        data_type: DataType.Int64,
-      },
-      {
-        name: 'chunk_id',
-        data_type: DataType.Int64,
-      },
-      {
-        name: 'vector',
+        name: 'embedding',
         data_type: DataType.FloatVector,
         dim: VECTOR_DIM,
+      },
+      {
+        name: 'knowledge_base_id',
+        data_type: DataType.Int64,
+      },
+      {
+        name: 'category',
+        data_type: DataType.VarChar,
+        max_length: 50,
+      },
+      {
+        name: 'content_type',
+        data_type: DataType.VarChar,
+        max_length: 50,
+      },
+      {
+        name: 'content',
+        data_type: DataType.VarChar,
+        max_length: 65535,
+      },
+      {
+        name: 'chapter',
+        data_type: DataType.VarChar,
+        max_length: 200,
+      },
+      {
+        name: 'page_number',
+        data_type: DataType.VarChar,
+        max_length: 50,
       },
     ],
   });
@@ -65,7 +95,7 @@ async function createCollection(): Promise<void> {
   // 创建索引
   await client.createIndex({
     collection_name: COLLECTION_NAME,
-    field_name: 'vector',
+    field_name: 'embedding',
     index_type: 'IVF_FLAT',
     metric_type: 'L2',
     params: { nlist: 128 },
@@ -86,11 +116,13 @@ async function createCollection(): Promise<void> {
  * @param docs langchain.js 的document集合
  * @param kbId 知识库ID
  * @param savedChunks 已保存的切片记录
+ * @param category 知识库分类
  */
 export async function addDocuments(
   docs: Document[],
   kbId: number,
-  savedChunks: Chunk[]
+  savedChunks: Chunk[],
+  category: string = ''
 ): Promise<void> {
   try {
     const client = await getMilvusClient();
@@ -107,15 +139,25 @@ export async function addDocuments(
     // 生成向量
     const vectors = await embeddings.embedDocuments(texts);
 
-    // 准备插入数据
-    const insertData = vectors.map((vector, index) => ({
-      kb_id: kbId,
-      chunk_id: savedChunks[index].id,
-      vector,
-    }));
+    // 准备插入数据 - 使用 VChunk 模型
+    const insertData: VChunk[] = vectors.map((vector, index) => {
+      const doc = docs[index];
+      const chunk = savedChunks[index];
+      const metadata = chunk.metadata || {};
+
+      return {
+        embedding: vector,
+        knowledge_base_id: kbId,
+        category: category || '',
+        content_type: metadata.contentType || 'text',
+        content: doc.pageContent,
+        chapter: metadata.chapter || '',
+        page_number: metadata.pageNumber?.toString() || metadata.page?.toString() || '',
+      };
+    });
 
     // 插入向量到 Milvus
-    const insertResult = await client.insert({
+    await client.insert({
       collection_name: COLLECTION_NAME,
       data: insertData,
     });
@@ -125,7 +167,7 @@ export async function addDocuments(
     for (let i = 0; i < savedChunks.length; i++) {
       await chunkRepository.update(
         { id: savedChunks[i].id },
-        { vector_id: insertResult.insert_cnt.toString() + '_' + i }
+        { vector_id: `${kbId}_${savedChunks[i].id}` }
       );
     }
 
@@ -147,7 +189,7 @@ export async function searchVectors(
   query: string,
   kbIds: number[],
   topK: number = 10
-): Promise<any[]> {
+): Promise<VChunkSearchResult[]> {
   try {
     const client = await getMilvusClient();
 
@@ -161,7 +203,7 @@ export async function searchVectors(
     const queryVector = await embeddings.embedQuery(query);
 
     // 构建过滤表达式
-    const expr = kbIds.length > 0 ? `kb_id in [${kbIds.join(',')}]` : '';
+    const expr = kbIds.length > 0 ? `knowledge_base_id in [${kbIds.join(',')}]` : '';
 
     // 执行向量检索
     const searchResult = await client.search({
@@ -169,7 +211,7 @@ export async function searchVectors(
       vector: queryVector,
       filter: expr,
       limit: topK,
-      output_fields: ['kb_id', 'chunk_id'],
+      output_fields: ['knowledge_base_id', 'category', 'content_type', 'content', 'chapter', 'page_number'],
     });
 
     return searchResult.results;
@@ -190,7 +232,7 @@ export async function deleteVectorsByKbId(kbId: number): Promise<void> {
 
     await client.delete({
       collection_name: COLLECTION_NAME,
-      filter: `kb_id == ${kbId}`,
+      filter: `knowledge_base_id == ${kbId}`,
     });
 
     console.log(`Deleted all vectors for KB ${kbId}`);

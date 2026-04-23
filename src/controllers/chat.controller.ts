@@ -3,13 +3,13 @@ import { AuthRequest } from '../middleware/auth';
 import { AppDataSource } from '../config/database';
 import { Conversation } from '../entities/Conversation';
 import { Message } from '../entities/Message';
-import { SSE } from 'sse-express';
-import { RagService } from '../services/ragService';
+import SSE from 'express-sse';
+
+import * as ragService from '../services/ragService';
 
 export class ChatController {
   private conversationRepository = AppDataSource.getRepository(Conversation);
   private messageRepository = AppDataSource.getRepository(Message);
-  private ragService = new RagService();
 
   /**
    * 创建好 sse后，调用ragService.execute 方法
@@ -18,25 +18,26 @@ export class ChatController {
    */
   stream = async (req: AuthRequest, res: Response) => {
     try {
+      const sse = new SSE()
+      sse.init(req,res)
       const { conversationId, message, kbIds } = req.query;
 
       if (!message) {
         return res.status(400).json({ code: 400, message: 'Message is required', data: null });
       }
 
-      const sse = new SSE(res);
+
 
       const kbIdArray = kbIds ? (Array.isArray(kbIds) ? kbIds : [kbIds]) : [];
 
-      await this.ragService.execute({
-        conversationId: conversationId as string,
-        kbIds: kbIdArray as string[],
+      await ragService.execute(
+        conversationId as string,
+        kbIdArray as string[],
         sse,
-        question: message as string,
-        userId: req.userId!,
-      });
+        message as string,
+        req.userId!
+      );
 
-      sse.close();
     } catch (error) {
       res.status(500).json({ code: 500, message: 'Stream failed', data: null });
     }

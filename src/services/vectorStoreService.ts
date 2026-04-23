@@ -13,7 +13,7 @@ let milvusClient: MilvusClient | null = null;
 /**
  * 获取 Milvus 客户端实例
  */
-async function getMilvusClient(): Promise<MilvusClient> {
+export async function getMilvusClient(): Promise<MilvusClient> {
   if (!milvusClient) {
     milvusClient = new MilvusClient({
       address: process.env.MILVUS_ADDRESS || 'localhost:19530',
@@ -179,6 +179,8 @@ export async function addDocuments(
   }
 }
 
+
+
 /**
  * 向量检索
  * @param query 查询文本
@@ -214,7 +216,7 @@ export async function searchVectors(
       output_fields: ['knowledge_base_id', 'category', 'content_type', 'content', 'chapter', 'page_number'],
     });
 
-    return searchResult.results;
+    return searchResult.results as VChunkSearchResult[];
 
   } catch (error) {
     console.error('Vector search failed:', error);

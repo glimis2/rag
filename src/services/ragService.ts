@@ -1,125 +1,216 @@
-import { OllamaEmbeddings } from '@langchain/ollama';
-import { ChatOllama } from '@langchain/ollama';
-import { VectorStoreService } from './vectorStoreService';
-import { ChunkRepository } from '../repositories/ChunkRepository';
+import 'dotenv/config';
 import { AppDataSource } from '../config/database';
 import { Conversation } from '../entities/Conversation';
 import { Message } from '../entities/Message';
-import { SSE } from 'sse-express';
+import { createRetriever } from '../retrieval/customerRetrieval';
+import { initChatModel } from 'langchain';
+import type SSE from 'sse-express';
 
-export interface RagExecuteOptions {
-  conversationId?: string;
-  kbIds?: string[];
-  sse: SSE;
-  question: string;
-  userId: number;
+const conversationRepository = AppDataSource.getRepository(Conversation);
+const messageRepository = AppDataSource.getRepository(Message);
+
+interface RetrievalLog {
+  originalQuery: string;
+  rewrittenQuery?: string;
+  vectorCount: number;
+  bm25Count?: number;
+  fusedCount?: number;
+  rerankedCount: number;
 }
 
-export class RagService {
-  private vectorStoreService: VectorStoreService;
-  private chunkRepository: ChunkRepository;
-  private conversationRepository = AppDataSource.getRepository(Conversation);
-  private messageRepository = AppDataSource.getRepository(Message);
-  private embeddings: OllamaEmbeddings;
-  private llm: ChatOllama;
+interface SourceInfo {
+  name: string;
+  chapter: string;
+  pageNumber: number;
+  category: string;
+  content?: string;
+}
 
-  constructor() {
-    this.vectorStoreService = new VectorStoreService();
-    this.chunkRepository = new ChunkRepository(AppDataSource);
+/**
+ * 执行 RAG 流程
+ * - 创建或获取会话
+ * - 保存用户消息
+ * - 查询改写（可选）
+ * - 向量检索与上下文压缩
+ * - 流式生成回复
+ * - 保存助手回复
+ * 
+ * 此处实际上走的就是一个流水线
+ */
+export async function execute(
+  conversationId: string | undefined,
+  kbIds: string[] | undefined,
+  sse: SSE,
+  question: string,
+  userId: number
+): Promise<void> {
+  let conversation: Conversation;
+  let fullResponse = '';
+  const startTime = Date.now();
+  const retrievalLog: RetrievalLog = {
+    originalQuery: question,
+    vectorCount: 0,
+    rerankedCount: 0,
+  };
 
-    this.embeddings = new OllamaEmbeddings({
-      model: process.env.OLLAMA_EMBEDDING_MODEL || 'bge-m3',
-      baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
-    });
-
-    this.llm = new ChatOllama({
-      model: process.env.OLLAMA_CHAT_MODEL || 'qwen2.5:7b',
-      baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
-      temperature: 0.7,
-    });
-  }
-
-  async execute(options: RagExecuteOptions): Promise<void> {
-    const { conversationId, kbIds, sse, question, userId } = options;
-
-    try {
-      let conversation: Conversation;
-
-      if (conversationId) {
-        conversation = await this.conversationRepository.findOne({
-          where: { id: parseInt(conversationId) },
-        });
-        if (!conversation) {
-          throw new Error('Conversation not found');
-        }
-      } else {
-        conversation = this.conversationRepository.create({
-          user_id: userId,
-          title: question.substring(0, 50),
-        });
-        await this.conversationRepository.save(conversation);
-
-        sse.send({ conversationId: conversation.id }, 'conversation');
-      }
-
-      const userMessage = this.messageRepository.create({
-        conversation_id: conversation.id,
-        role: 'user',
-        content: question,
+  try {
+    // 1. 创建或获取会话
+    if (conversationId) {
+      conversation = await conversationRepository.findOne({
+        where: { id: parseInt(conversationId) },
       });
-      await this.messageRepository.save(userMessage);
-
-      let context = '';
-      let sourceChunks: any[] = [];
-
-      if (kbIds && kbIds.length > 0) {
-        const relevantChunks = await this.vectorStoreService.searchVectors(
-          question,
-          kbIds,
-          5
-        );
-
-        if (relevantChunks.length > 0) {
-          sourceChunks = relevantChunks;
-          context = relevantChunks
-            .map((chunk, index) => `[${index + 1}] ${chunk.content}`)
-            .join('\n\n');
-
-          sse.send({ sources: sourceChunks }, 'sources');
-        }
+      if (!conversation) {
+        throw new Error('Conversation not found');
       }
+    } else {
+      conversation = conversationRepository.create({
+        user_id: userId,
+        title: question.substring(0, 50),
+      });
+      await conversationRepository.save(conversation);
+      sse.send({ conversationId: conversation.id }, 'conversation');
+    }
 
-      const prompt = context
-        ? `基于以下上下文回答问题：
+    // 2. 保存用户消息
+    const userMessage = messageRepository.create({
+      conversation_id: conversation.id,
+      role: 'user',
+      content: question,
+    });
+    await messageRepository.save(userMessage);
+    // ---------------------- 下面开始 走计算
+    // 3. 初始化模型
+    const model = await initChatModel('deepseek-chat', {
+      modelProvider: 'openai',
+      configuration: {
+        baseURL: 'https://api.deepseek.com/v1',
+      },
+      apiKey: process.env.DEEPSEEK_API_KEY,
+      temperature: 0.3,
+    });
 
-上下文：
+    // 4. 创建检索器
+    const retriever = await createRetriever(sse, kbIds);
+
+    // 5. 检索相关文档（已包含向量检索 + BM25重排序）
+    const docs = await retriever.invoke(question);
+    retrievalLog.vectorCount = docs.length;
+    retrievalLog.rerankedCount = docs.length;
+
+    sse.send(
+      {
+        totalCount: docs.length,
+        tools: ['doc_search'],
+        mode: 'selected_document',
+      },
+      'retrieval'
+    );
+
+    // sse.send(
+    //   {
+    //     topK: docs.length,
+    //     reranked: docs.length,
+    //   },
+    //   'rerank'
+    // );
+
+    // 6. 处理检索结果
+    if (docs.length > 0) {
+      // 发送检索到的文档源
+      const sources: SourceInfo[] = docs.map((doc) => ({
+        name: doc.metadata.source || 'Unknown',
+        chapter: doc.metadata.chapter || '',
+        pageNumber: doc.metadata.page || 0,
+        category: doc.metadata.category || '',
+        content: doc.pageContent,
+      }));
+
+      // 7. 构建提示词
+      const context = docs.map((doc) => doc.pageContent).join('\n\n');
+
+      // 8. 开始生成
+      sse.send({ message: '开始生成...' }, 'start');
+
+      const prompt = `你是一个专业的AI助手。请根据提供的上下文信息准确回答用户的问题。如果上下文中没有相关信息，请明确说明。
+
+上下文信息：
 ${context}
 
-问题：${question}
+用户问题：${question}`;
 
-请根据上下文提供准确的回答。如果上下文中没有相关信息，请说明。`
-        : question;
-
-      const stream = await this.llm.stream(prompt);
-      let fullResponse = '';
+      // 9. 流式生成回复
+      const stream = await model.stream(prompt);
 
       for await (const chunk of stream) {
-        const token = chunk.content.toString();
-        fullResponse += token;
-        sse.send({ token }, 'token');
+        const content = chunk.content as string;
+        if (content) {
+          fullResponse += content;
+          sse.send({ content }, 'token');
+        }
       }
 
-      const assistantMessage = this.messageRepository.create({
+      // 10. 保存助手回复
+      const assistantMessage = messageRepository.create({
         conversation_id: conversation.id,
         role: 'assistant',
         content: fullResponse,
       });
-      await this.messageRepository.save(assistantMessage);
+      await messageRepository.save(assistantMessage);
 
-      sse.send({ done: true }, 'done');
-    } catch (error) {
-      sse.send({ error: error.message }, 'error');
-      throw error;
+      // 11. 发送完成事件
+      const responseTime = Date.now() - startTime;
+      sse.send(
+        {
+          sources,
+          isFallback: false,
+          isEmergency: false,
+          responseTime,
+          conversationId: conversation.id,
+          retrievalLog,
+        },
+        'done'
+      );
+    } else {
+      // 无检索结果，直接对话
+      sse.send({ message: '开始生成...' }, 'start');
+
+      const prompt = `你是一个友好、专业的AI助手。请用简洁、准确的语言回答用户的问题。
+
+用户问题：${question}`;
+
+      const stream = await model.stream(prompt);
+
+      for await (const chunk of stream) {
+        const content = chunk.content as string;
+        if (content) {
+          fullResponse += content;
+          sse.send({ content }, 'token');
+        }
+      }
+
+      const assistantMessage = messageRepository.create({
+        conversation_id: conversation.id,
+        role: 'assistant',
+        content: fullResponse,
+      });
+      await messageRepository.save(assistantMessage);
+
+      const responseTime = Date.now() - startTime;
+      sse.send(
+        {
+          sources: [],
+          isFallback: true,
+          isEmergency: false,
+          responseTime,
+          conversationId: conversation.id,
+          retrievalLog,
+        },
+        'done'
+      );
     }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    sse.send({ message: errorMessage }, 'error');
+    throw error;
   }
-} 
+}

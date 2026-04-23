@@ -157,6 +157,7 @@ export async function processDocument(kb: KnowledgeBase, file: Express.Multer.Fi
     // 6. 调用向量存储服务
     await addDocuments(splitDocs, kb.id, savedChunks, kb.category || '');
 
+
     // 7. 更新知识库状态为 ready
     await kbRepository.update(
       { id: kb.id },
@@ -166,7 +167,7 @@ export async function processDocument(kb: KnowledgeBase, file: Express.Multer.Fi
       }
     );
 
-    console.log(`Document processed successfully: KB ID ${kb.id}, ${splitDocs.length} chunks created`);
+    console.log(`Document processed successfully: KB ID ${kb.id}chunks created`);
 
   } catch (error) {
     console.error('Document processing failed:', error);

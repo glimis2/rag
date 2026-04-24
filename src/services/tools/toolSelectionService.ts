@@ -29,17 +29,17 @@ export interface ToolSelectionResult {
  * 工具选择服务
  */
 export class ToolSelectionService {
-  private readonly openai;
+  private readonly deepseek;
   private readonly model: string;
 
   constructor(
     apiKey?: string,
     baseURL?: string,
-    model: string = 'gpt-4o-mini'
+    model: string = 'deepseek-chat'
   ) {
-    this.openai = createOpenAI({
-      apiKey: apiKey || process.env.OPENAI_API_KEY,
-      baseURL: baseURL || process.env.OPENAI_BASE_URL,
+    this.deepseek = createOpenAI({
+      apiKey: apiKey || process.env.DEEPSEEK_API_KEY,
+      baseURL: baseURL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1',
     });
     this.model = model;
   }
@@ -60,7 +60,7 @@ export class ToolSelectionService {
       const systemPrompt = this.buildSystemPrompt(kbIds);
 
       const result = await generateText({
-        model: this.openai(this.model),
+        model: this.deepseek(this.model),
         system: systemPrompt,
         prompt: query,
         tools: availableTools,

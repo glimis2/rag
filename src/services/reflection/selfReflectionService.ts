@@ -14,7 +14,7 @@ import { RetrievedChunk } from '../rag/types';
  */
 export class SelfReflectionService {
   private readonly evaluator: AnswerEvaluator;
-  private readonly openai;
+  private readonly deepseek;
   private readonly model: string;
   private readonly maxReflections: number;
   private readonly confidenceThreshold: number;
@@ -22,14 +22,14 @@ export class SelfReflectionService {
   constructor(
     apiKey?: string,
     baseURL?: string,
-    model: string = 'gpt-4o-mini',
+    model: string = 'deepseek-chat',
     maxReflections: number = 3,
     confidenceThreshold: number = 0.8
   ) {
     this.evaluator = new AnswerEvaluator(apiKey, baseURL, model);
-    this.openai = createOpenAI({
-      apiKey: apiKey || process.env.OPENAI_API_KEY,
-      baseURL: baseURL || process.env.OPENAI_BASE_URL,
+    this.deepseek = createOpenAI({
+      apiKey: apiKey || process.env.DEEPSEEK_API_KEY,
+      baseURL: baseURL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1',
     });
     this.model = model;
     this.maxReflections = maxReflections;
@@ -151,7 +151,7 @@ ${evaluation.suggestions.join('\n')}
 改进后的答案：`;
 
       const result = await generateText({
-        model: this.openai(this.model),
+        model: this.deepseek(this.model),
         prompt,
         temperature: 0.7,
       });

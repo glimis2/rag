@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(git checkout *)",
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'Add RAG Agent refactor design document *)",
+      "Bash(npx tsc *)",
+      "Bash(git commit -m ' *)",
+      "Bash(npm list *)"
     ]
   }
 }

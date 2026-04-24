@@ -1,14 +1,10 @@
 /**
  * 记忆服务
  *
- * 管理用户的短期记忆（Redis）和长期记忆（数据库）
- * 第二阶段：实现基于 Redis 的短期记忆
- * 第三阶段：扩展为完整的记忆系统（Redis + 数据库）
+ * 管理用户的记忆（纯内存存储，基于 Redis）
  */
 
 import { getRedisClient } from '../../config/redis';
-import { AppDataSource } from '../../config/database';
-import { UserMemory } from '../../entities/UserMemory';
 
 /**
  * 记忆条目
@@ -21,20 +17,18 @@ export interface MemoryEntry {
 }
 
 /**
- * 记忆服务
+ * 记忆服务（纯内存实现）
  */
 export class MemoryService {
-  private readonly memoryTTL: number; // 短期记忆 TTL（秒）
-  private readonly memoryRepository;
+  private readonly memoryTTL: number; // 记忆 TTL（秒）
 
   constructor(memoryTTL: number = 86400) {
     // 默认 24 小时
     this.memoryTTL = memoryTTL;
-    this.memoryRepository = AppDataSource.getRepository(UserMemory);
   }
 
   /**
-   * 存储记忆（Redis + 数据库双写）
+   * 存储记忆（仅 Redis）
    */
   async storeMemory(
     userId: number,
@@ -43,7 +37,6 @@ export class MemoryService {
     importance: 'low' | 'medium' | 'high' = 'medium'
   ): Promise<void> {
     try {
-      // 1. 写入 Redis（短期记忆）
       const redis = await getRedisClient();
       const key = `memory:${userId}:${topic}`;
 
@@ -56,16 +49,6 @@ export class MemoryService {
 
       await redis.setEx(key, this.memoryTTL, JSON.stringify(entry));
 
-      // 2. 写入数据库（长期记忆）
-      const memory = this.memoryRepository.create({
-        user_id: userId,
-        topic,
-        content,
-        importance,
-      });
-
-      await this.memoryRepository.save(memory);
-
       console.log(`[Memory] Stored memory for user ${userId}, topic: ${topic}`);
     } catch (error) {
       console.error('[Memory] Failed to store memory:', error);
@@ -73,7 +56,7 @@ export class MemoryService {
   }
 
   /**
-   * 召回记忆（优先 Redis，降级到数据库）
+   * 召回记忆（仅从 Redis）
    * @param userId 用户 ID
    * @param topic 主题（可选，用于过滤）
    * @param limit 返回数量限制
@@ -84,21 +67,7 @@ export class MemoryService {
     limit: number = 5
   ): Promise<MemoryEntry[]> {
     try {
-      // 1. 先从 Redis 读取
-      const redisMemories = await this.recallFromRedis(userId, topic, limit);
-
-      // 2. 如果 Redis 结果不足，从数据库补充
-      if (redisMemories.length < limit) {
-        const dbMemories = await this.recallFromDatabase(
-          userId,
-          topic,
-          limit - redisMemories.length
-        );
-
-        return [...redisMemories, ...dbMemories];
-      }
-
-      return redisMemories;
+      return await this.recallFromRedis(userId, topic, limit);
     } catch (error) {
       console.error('[Memory] Failed to recall memory:', error);
       return [];
@@ -136,34 +105,6 @@ export class MemoryService {
     return this.sortAndLimitMemories(memories, limit);
   }
 
-  /**
-   * 从数据库召回记忆
-   */
-  private async recallFromDatabase(
-    userId: number,
-    topic?: string,
-    limit: number = 5
-  ): Promise<MemoryEntry[]> {
-    const queryBuilder = this.memoryRepository
-      .createQueryBuilder('memory')
-      .where('memory.user_id = :userId', { userId })
-      .orderBy('memory.importance', 'DESC')
-      .addOrderBy('memory.created_at', 'DESC')
-      .limit(limit);
-
-    if (topic) {
-      queryBuilder.andWhere('memory.topic = :topic', { topic });
-    }
-
-    const dbMemories = await queryBuilder.getMany();
-
-    return dbMemories.map((m) => ({
-      topic: m.topic,
-      content: m.content,
-      importance: m.importance,
-      timestamp: m.created_at.getTime(),
-    }));
-  }
 
   /**
    * 排序和限制记忆数量
@@ -193,9 +134,6 @@ export class MemoryService {
       const key = `memory:${userId}:${topic}`;
       await redis.del(key);
 
-      // 同时删除数据库记录
-      await this.memoryRepository.delete({ user_id: userId, topic });
-
       console.log(`[Memory] Deleted memory for user ${userId}, topic: ${topic}`);
     } catch (error) {
       console.error('[Memory] Failed to delete memory:', error);
@@ -214,9 +152,6 @@ export class MemoryService {
         await redis.del(keys);
       }
 
-      // 同时清除数据库记录
-      await this.memoryRepository.delete({ user_id: userId });
-
       console.log(`[Memory] Cleared all memories for user ${userId}`);
     } catch (error) {
       console.error('[Memory] Failed to clear user memory:', error);
@@ -231,9 +166,8 @@ export class MemoryService {
     byImportance: Record<string, number>;
   }> {
     try {
-      const memories = await this.memoryRepository.find({
-        where: { user_id: userId },
-      });
+      const redis = await getRedisClient();
+      const keys = await redis.keys(`memory:${userId}:*`);
 
       const byImportance: Record<string, number> = {
         low: 0,
@@ -241,12 +175,16 @@ export class MemoryService {
         high: 0,
       };
 
-      memories.forEach((m) => {
-        byImportance[m.importance]++;
-      });
+      for (const key of keys) {
+        const data = await redis.get(key);
+        if (data) {
+          const memory = JSON.parse(data) as MemoryEntry;
+          byImportance[memory.importance]++;
+        }
+      }
 
       return {
-        totalCount: memories.length,
+        totalCount: keys.length,
         byImportance,
       };
     } catch (error) {

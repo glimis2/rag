@@ -8,7 +8,8 @@
       "Bash(npx tsc *)",
       "Bash(git commit -m ' *)",
       "Bash(npm list *)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(git commit *)"
     ]
   }
 }

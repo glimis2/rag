@@ -18,6 +18,12 @@ import { RetrievedChunk } from './rag/types';
 import { RagCacheService, CachedResult } from './cache/ragCacheService';
 import { ToolSelectionService } from './tools/toolSelectionService';
 import { MemoryService } from './memory/memoryService';
+import { MemoryExtractor } from './memory/memoryExtractor';
+
+// 第三阶段：反思、安全、提示词组装
+import { SelfReflectionService } from './reflection/selfReflectionService';
+import { SafetyGuard } from './safety/safetyGuard';
+import { PromptAssembler } from './prompt/promptAssembler';
 
 const conversationRepository = AppDataSource.getRepository(Conversation);
 const messageRepository = AppDataSource.getRepository(Message);
@@ -32,6 +38,8 @@ interface RetrievalLog {
   rerankedCount: number;
   compressedCount?: number;
   toolsUsed: string[];
+  reflectionRounds?: number;
+  confidence?: number;
 }
 
 interface SourceInfo {
@@ -77,6 +85,10 @@ export async function execute(
   const cacheService = new RagCacheService();
   const toolSelectionService = new ToolSelectionService();
   const memoryService = new MemoryService();
+  const memoryExtractor = new MemoryExtractor();
+  const reflectionService = new SelfReflectionService();
+  const safetyGuard = new SafetyGuard();
+  const promptAssembler = new PromptAssembler();
 
   try {
     // 1. 创建或获取会话
@@ -162,7 +174,17 @@ export async function execute(
       sources = result.sources;
     }
 
-    // 7. 召回记忆并合并到上下文
+    // 7. 安全检查
+    const safetyCheck = safetyGuard.check(question, compressedChunks);
+
+    if (safetyCheck.isEmergency) {
+      sse.send(
+        { message: '检测到紧急情况关键词', isEmergency: true },
+        'thought'
+      );
+    }
+
+    // 8. 召回记忆并合并到上下文
     const memories = await memoryService.recallMemory(userId, undefined, 3);
     if (memories.length > 0) {
       sse.send(
@@ -172,7 +194,7 @@ export async function execute(
       retrievalLog.toolsUsed.push('recall_memory');
     }
 
-    // 8. 初始化模型
+    // 9. 初始化模型
     const model = await initChatModel('deepseek-chat', {
       modelProvider: 'openai',
       configuration: {
@@ -182,17 +204,32 @@ export async function execute(
       temperature: 0.3,
     });
 
-    // 9. 生成回复
+    // 10. 生成回复
     if (compressedChunks.length > 0 || memories.length > 0) {
-      const context = buildContext(compressedChunks, memories);
+      // 使用 PromptAssembler 组装提示词
+      const assembled = safetyCheck.needsFallback
+        ? promptAssembler.assembleForFallback(question, memories)
+        : promptAssembler.assembleForStreaming(question, compressedChunks, memories);
 
       sse.send({ message: '开始生成回答...' }, 'start');
 
-      const prompt = `你是一个专业的AI助手。请根据提供的上下文信息准确回答用户的问题。如果上下文中没有相关信息，请明确说明。
+      // 添加紧急情况提示
+      if (safetyCheck.isEmergency) {
+        const emergencyNotice = safetyGuard.getEmergencyNotice();
+        fullResponse += emergencyNotice;
+        sse.send({ content: emergencyNotice }, 'token');
+      }
 
-${context}
+      // 添加降级提示
+      if (safetyCheck.needsFallback) {
+        const fallbackNotice = safetyGuard.getFallbackNotice(safetyCheck.fallbackReason);
+        fullResponse += fallbackNotice + '\n\n';
+        sse.send({ content: fallbackNotice + '\n\n' }, 'token');
+      }
 
-用户问题：${question}`;
+      const prompt = `${assembled.systemPrompt}
+
+${assembled.userMessage}`;
 
       const stream = await model.stream(prompt);
 
@@ -204,7 +241,44 @@ ${context}
         }
       }
 
-      // 10. 保存助手回复
+      // 11. Self-Reflection（流式模式，仅评估不重新生成）
+      sse.send({ message: '正在评估答案质量...' }, 'thought');
+
+      const reflectionResult = await reflectionService.reflect(
+        question,
+        fullResponse,
+        compressedChunks,
+        true // 流式模式
+      );
+
+      retrievalLog.reflectionRounds = reflectionResult.reflectionRounds;
+      retrievalLog.confidence = reflectionResult.evaluation.confidence;
+
+      // 如果反思后添加了提示，更新完整回复
+      if (reflectionResult.answer !== fullResponse) {
+        const additionalContent = reflectionResult.answer.substring(fullResponse.length);
+        fullResponse = reflectionResult.answer;
+        sse.send({ content: additionalContent }, 'token');
+      }
+
+      // 12. 提取并存储记忆
+      const extractedMemories = await memoryExtractor.extract(question, fullResponse);
+      for (const memory of extractedMemories) {
+        await memoryService.storeMemory(
+          userId,
+          memory.topic,
+          memory.content,
+          memory.importance
+        );
+      }
+      if (extractedMemories.length > 0) {
+        sse.send(
+          { message: `已存储 ${extractedMemories.length} 条新记忆` },
+          'thought'
+        );
+      }
+
+      // 13. 保存助手回复
       const assistantMessage = messageRepository.create({
         conversation_id: conversation.id,
         role: 'assistant',
@@ -212,23 +286,23 @@ ${context}
       });
       await messageRepository.save(assistantMessage);
 
-      // 11. 写入缓存（频次驱动）
+      // 14. 写入缓存（频次驱动）
       const cachedResult: CachedResult = {
         answer: fullResponse,
         sources,
         retrievalLog,
         timestamp: Date.now(),
-        isFallback: false,
+        isFallback: safetyCheck.needsFallback,
       };
       await cacheService.putCache(normalizedQuery, cachedResult, frequency);
 
-      // 12. 发送完成事件
+      // 15. 发送完成事件
       const responseTime = Date.now() - startTime;
       sse.send(
         {
           sources,
-          isFallback: false,
-          isEmergency: false,
+          isFallback: safetyCheck.needsFallback,
+          isEmergency: safetyCheck.isEmergency,
           responseTime,
           conversationId: conversation.id,
           retrievalLog,
@@ -246,7 +320,13 @@ ${context}
         retrievalLog,
         cacheService,
         normalizedQuery,
-        frequency
+        frequency,
+        memoryService,
+        memoryExtractor,
+        reflectionService,
+        safetyGuard,
+        promptAssembler,
+        userId
       );
     }
   } catch (error) {
@@ -442,15 +522,42 @@ async function handleFallback(
   retrievalLog: RetrievalLog,
   cacheService: RagCacheService,
   normalizedQuery: string,
-  frequency: number
+  frequency: number,
+  memoryService: MemoryService,
+  memoryExtractor: MemoryExtractor,
+  reflectionService: SelfReflectionService,
+  safetyGuard: SafetyGuard,
+  promptAssembler: PromptAssembler,
+  userId: number
 ): Promise<void> {
   let fullResponse = '';
 
+  // 安全检查
+  const safetyCheck = safetyGuard.check(question, []);
+
+  // 召回记忆
+  const memories = await memoryService.recallMemory(userId, undefined, 3);
+
   sse.send({ message: '未找到相关文档，使用通用知识回答...' }, 'start');
 
-  const prompt = `你是一个友好、专业的AI助手。请用简洁、准确的语言回答用户的问题。
+  // 添加紧急情况提示
+  if (safetyCheck.isEmergency) {
+    const emergencyNotice = safetyGuard.getEmergencyNotice();
+    fullResponse += emergencyNotice;
+    sse.send({ content: emergencyNotice }, 'token');
+  }
 
-用户问题：${question}`;
+  // 添加降级提示
+  const fallbackNotice = safetyGuard.getFallbackNotice('未检索到相关文档');
+  fullResponse += fallbackNotice + '\n\n';
+  sse.send({ content: fallbackNotice + '\n\n' }, 'token');
+
+  // 使用 PromptAssembler 组装提示词
+  const assembled = promptAssembler.assembleForFallback(question, memories);
+
+  const prompt = `${assembled.systemPrompt}
+
+${assembled.userMessage}`;
 
   const stream = await model.stream(prompt);
 
@@ -460,6 +567,34 @@ async function handleFallback(
       fullResponse += content;
       sse.send({ content }, 'token');
     }
+  }
+
+  // Self-Reflection（流式模式）
+  const reflectionResult = await reflectionService.reflect(
+    question,
+    fullResponse,
+    [],
+    true
+  );
+
+  retrievalLog.reflectionRounds = reflectionResult.reflectionRounds;
+  retrievalLog.confidence = reflectionResult.evaluation.confidence;
+
+  if (reflectionResult.answer !== fullResponse) {
+    const additionalContent = reflectionResult.answer.substring(fullResponse.length);
+    fullResponse = reflectionResult.answer;
+    sse.send({ content: additionalContent }, 'token');
+  }
+
+  // 提取并存储记忆
+  const extractedMemories = await memoryExtractor.extract(question, fullResponse);
+  for (const memory of extractedMemories) {
+    await memoryService.storeMemory(
+      userId,
+      memory.topic,
+      memory.content,
+      memory.importance
+    );
   }
 
   const assistantMessage = messageRepository.create({
@@ -485,7 +620,7 @@ async function handleFallback(
     {
       sources: [],
       isFallback: true,
-      isEmergency: false,
+      isEmergency: safetyCheck.isEmergency,
       responseTime,
       conversationId: conversation.id,
       retrievalLog,
